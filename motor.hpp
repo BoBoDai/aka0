@@ -14,6 +14,8 @@ class Motor {
     void right(int speed);
     void brake();
     void standby();
+    // 差速驱动：正值前进，负值后退，范围 [-100, 100]
+    void drive(int left_speed, int right_speed);
 
   private:
     void set_pwm_duty_cycle(int pwm_id, int duty_cycle);

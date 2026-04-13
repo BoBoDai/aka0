@@ -57,7 +57,7 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
-add_executable(tennis tennis.cpp motor.cpp vi_capture.cpp)
+add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp)
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}
@@ -68,3 +68,6 @@ target_link_libraries(tennis
     -Wl,--end-group
     ${EXTRA_LIBS})
 install(TARGETS tennis DESTINATION samples_extra/bin)
+
+# Arm test utility (no SDK dependencies needed)
+add_executable(arm_test arm_test.cpp arm.cpp)

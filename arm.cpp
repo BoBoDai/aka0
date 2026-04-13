@@ -1,0 +1,157 @@
+#include "arm.hpp"
+#include "logger.hpp"
+#include <fcntl.h>
+#include <unistd.h>
+#include <termios.h>
+#include <cstring>
+#include <cstdio>
+#include <algorithm>
+
+const float Arm::ID2_ANGLE_OPEN = 150.0f;
+const float Arm::ID2_ANGLE_CLOSE = 90.0f;
+const float Arm::ANGLE_MAX = 270.0f;
+
+Arm::Arm(const std::string& port, int baudrate) : fd_(-1) {
+    open_serial(port, baudrate);
+}
+
+Arm::~Arm() {
+    close_serial();
+}
+
+void Arm::open_serial(const std::string& port, int baudrate) {
+    fd_ = open(port.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
+    if (fd_ < 0) {
+        LOGE("[ARM] Failed to open serial port %s: %s", port.c_str(), strerror(errno));
+        return;
+    }
+
+    struct termios tty;
+    memset(&tty, 0, sizeof(tty));
+    if (tcgetattr(fd_, &tty) != 0) {
+        LOGE("[ARM] tcgetattr failed: %s", strerror(errno));
+        close_serial();
+        return;
+    }
+
+    speed_t baud;
+    switch (baudrate) {
+        case 9600:   baud = B9600;   break;
+        case 115200: baud = B115200; break;
+        default:     baud = B115200; break;
+    }
+    cfsetispeed(&tty, baud);
+    cfsetospeed(&tty, baud);
+
+    // 8N1, no flow control
+    tty.c_cflag &= ~PARENB;
+    tty.c_cflag &= ~CSTOPB;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~CRTSCTS;
+    tty.c_cflag |= CLOCAL | CREAD;
+
+    // Raw mode
+    tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
+    tty.c_iflag &= ~(INLCR | ICRNL | IGNCR);
+    tty.c_oflag &= ~OPOST;
+
+    // 100ms timeout
+    tty.c_cc[VMIN] = 0;
+    tty.c_cc[VTIME] = 1;
+
+    tcflush(fd_, TCIFLUSH);
+    if (tcsetattr(fd_, TCSANOW, &tty) != 0) {
+        LOGE("[ARM] tcsetattr failed: %s", strerror(errno));
+        close_serial();
+        return;
+    }
+
+    LOGI("[ARM] Serial port %s opened at %d baud", port.c_str(), baudrate);
+}
+
+void Arm::close_serial() {
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+}
+
+void Arm::send_command(const std::string& cmd) {
+    if (fd_ < 0) {
+        LOGE("[ARM] Serial port not open, cannot send: %s", cmd.c_str());
+        return;
+    }
+    write(fd_, cmd.c_str(), cmd.size());
+    tcdrain(fd_);
+}
+
+int Arm::angle_to_pulse(float angle) const {
+    int pulse = static_cast<int>(500 + (angle / ANGLE_MAX) * 2000);
+    return std::max(PULSE_MIN, std::min(PULSE_MAX, pulse));
+}
+
+void Arm::set_angle(int servo_id, float angle, int time_ms) {
+    if (angle < 0 || angle > ANGLE_MAX) {
+        LOGW("[ARM] Angle %.1f out of range [0, %.0f], clamping", angle, ANGLE_MAX);
+        angle = std::max(0.0f, std::min(ANGLE_MAX, angle));
+    }
+    int pulse = angle_to_pulse(angle);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "#%03dP%04dT%d!", servo_id, pulse, time_ms);
+    send_command(buf);
+    LOGD("[ARM] servo %d -> angle %.1f (pulse %d, %dms)", servo_id, angle, pulse, time_ms);
+}
+
+void Arm::release_torque(int servo_id) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%03dPULK", servo_id);
+    send_command(buf);
+    LOGD("[ARM] servo %d torque released", servo_id);
+}
+
+void Arm::restore_torque(int servo_id) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "#%03dPULR", servo_id);
+    send_command(buf);
+    LOGD("[ARM] servo %d torque restored", servo_id);
+}
+
+// Grab sequence - angles calibrated for current arm setup
+void Arm::grab() {
+    LOGI("[ARM] Grab sequence start");
+    // 张开夹爪
+    set_angle(2, ID2_ANGLE_OPEN);
+    usleep(300 * 1000);
+
+    // 伸到球的位置
+    set_angle(0, 240);
+    set_angle(1, 90);
+    usleep(1000 * 1000);
+
+    // 闭合夹爪
+    set_angle(2, ID2_ANGLE_CLOSE);
+    usleep(1000 * 1000);
+
+    LOGI("[ARM] Grab sequence done");
+}
+
+void Arm::release_pos() {
+    LOGI("[ARM] Moving to release position");
+    set_angle(0, 140);
+    set_angle(1, 220);
+    set_angle(2, ID2_ANGLE_CLOSE);
+}
+
+void Arm::release() {
+    LOGI("[ARM] Releasing gripper");
+    set_angle(2, ID2_ANGLE_OPEN);
+}
+
+void Arm::grab_pos() {
+    LOGI("[ARM] Moving to home/ready position");
+    set_angle(0, 240);
+    set_angle(1, 90);
+    set_angle(2, ID2_ANGLE_OPEN);
+}

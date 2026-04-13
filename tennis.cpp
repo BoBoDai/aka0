@@ -13,6 +13,7 @@
 #include <opencv2/opencv.hpp>
 #include "cviruntime.h"
 #include "motor.hpp"
+#include "arm.hpp"
 
 // VI related headers - must include base types first
 #include "vi_capture.hpp"
@@ -241,44 +242,96 @@ int getDetections(CVI_TENSOR* output, int32_t input_height, int32_t input_width,
     return count;
 }
 
-// 根据球的位置控制小车移动
-void controlMotor(Motor& motor, float ball_x, float ball_y, int image_width, int image_height) {
-    // 计算球相对于图像中心的位置
-    float center_x = image_width / 2.0f;
-    float center_y = image_height / 2.0f;
-    float offset_x = ball_x - center_x;
-    float offset_y = ball_y - center_y;
+// ============ 状态机 (移植自 AKA-00 tennis_hunter.py) ============
 
-    // 定义阈值
-    float x_threshold = image_width * 0.08f;  // 左右偏移阈值（8%图像宽度）
-    float y_threshold = image_height * 0.08f; // 前后偏移阈值（8%图像高度）
+enum RobotStatus {
+    STATUS_CHASE_TENNIS,     // 追球
+    STATUS_POSITION_TENNIS,  // 精确对准
+    STATUS_GRAB_TENNIS,      // 确认并抓取
+};
 
-    int speed = 50; // 基础速度50%
-
-    // 决策逻辑：优先处理左右偏移，然后处理前后距离
-    if (fabs(offset_x) > x_threshold) {
-        // 球偏左或偏右
-        if (offset_x < 0) {
-            LOGD("[MOTOR] LEFT (ball_x=%.1f, offset=%.1f)", ball_x, offset_x);
-            motor.left(speed);
-        } else {
-            LOGD("[MOTOR] RIGHT (ball_x=%.1f, offset=%.1f)", ball_x, offset_x);
-            motor.right(speed);
-        }
-    } else if (offset_y > y_threshold) {
-        // 球在图像下方，表示距离近，后退
-        LOGD("[MOTOR] BACKWARD (ball_y=%.1f, offset=%.1f)", ball_y, offset_y);
-        motor.backward(speed);
-    } else if (offset_y < -y_threshold) {
-        // 球在图像上方，表示距离远，前进
-        LOGD("[MOTOR] FORWARD (ball_y=%.1f, offset=%.1f)", ball_y, offset_y);
-        motor.forward(speed);
-    } else {
-        // 球在中心位置，停止
-        LOGD("[MOTOR] STANDBY (centered)");
-        motor.standby();
+static const char* status_name(RobotStatus s) {
+    switch (s) {
+        case STATUS_CHASE_TENNIS:    return "chase_tennis";
+        case STATUS_POSITION_TENNIS: return "position_tennis";
+        case STATUS_GRAB_TENNIS:     return "grab_tennis";
     }
+    return "unknown";
 }
+
+// P 控制参数（AKA-00 的 MAX_SPEED=240 对应 PWM 范围，我们的 Motor 是 0-100）
+static const int FRAME_WIDTH       = 640;
+static const int X_LEFT_GRAB       = 258;
+static const int X_RIGHT_GRAB      = 298;   // X_LEFT_GRAB + 40
+static const int TENNIS_WIDTH_FAR  = 320;
+static const int TENNIS_WIDTH_NEAR = 380;
+static const int MAX_SPEED         = 100;    // Motor 范围 0-100
+static const int MIN_SPEED         = MAX_SPEED / 6;  // ~16
+static const int IDLE_SPEED        = MAX_SPEED / 3;  // ~33
+static const float WHEEL_BASE      = 10.0f;
+static const float Kp_dist         = 0.8f;
+static const float Kp_angle        = 0.02f;
+static const int GRAB_CONFIRM_THRESHOLD = 10;
+
+struct RobotState {
+    RobotStatus status;
+    int box_x;          // bbox 左上角 x
+    int box_w;          // bbox 宽度
+    int grab_confirm_count;
+
+    RobotState() : status(STATUS_CHASE_TENNIS), box_x(0), box_w(0), grab_confirm_count(0) {}
+
+    void update_status() {
+        if (status == STATUS_CHASE_TENNIS) {
+            if (box_w >= TENNIS_WIDTH_FAR && box_w <= TENNIS_WIDTH_NEAR) {
+                status = STATUS_POSITION_TENNIS;
+                LOGI("[STATE] chase -> position (w=%d)", box_w);
+            }
+        } else if (status == STATUS_POSITION_TENNIS) {
+            if (box_w < TENNIS_WIDTH_FAR || box_w > TENNIS_WIDTH_NEAR) {
+                status = STATUS_CHASE_TENNIS;
+                LOGI("[STATE] position -> chase (w=%d out of range)", box_w);
+            } else if (box_x >= X_LEFT_GRAB && box_x <= X_RIGHT_GRAB) {
+                status = STATUS_GRAB_TENNIS;
+                LOGI("[STATE] position -> grab (x=%d centered)", box_x);
+            }
+        }
+    }
+
+    // 计算差速 PWM，返回 left, right（范围 [-MAX_SPEED, MAX_SPEED]）
+    void calc_motor_speed(int& left_pwm, int& right_pwm) {
+        int TARGET_X = FRAME_WIDTH / 2;
+        int TARGET_W = static_cast<int>(TENNIS_WIDTH_FAR * 0.6f + TENNIS_WIDTH_NEAR * 0.4f);
+
+        float error_x = (box_x + box_w / 2.0f) - TARGET_X;
+        float error_w = box_w - TARGET_W;
+
+        float raw_v = -Kp_dist * error_w;
+        float raw_omega = -Kp_angle * error_x;
+
+        // 动态限速：急转弯时降速
+        float turn_factor = fabs(error_x) / (FRAME_WIDTH / 2.0f);
+        float max_v = (turn_factor > 0.8f) ? MIN_SPEED * 0.3f : MAX_SPEED;
+
+        float v = std::max(-max_v, std::min(max_v, raw_v));
+        if (fabs(v) < MIN_SPEED && fabs(v) > 0)
+            v = (v > 0) ? MIN_SPEED : -MIN_SPEED;
+
+        float diff_speed = raw_omega * WHEEL_BASE;
+        float lf = v + diff_speed;
+        float rf = v - diff_speed;
+
+        // 限幅
+        lf = std::max((float)-MAX_SPEED, std::min((float)MAX_SPEED, lf));
+        rf = std::max((float)-MAX_SPEED, std::min((float)MAX_SPEED, rf));
+
+        if (fabs(lf) < MIN_SPEED && lf != 0) lf = (lf > 0) ? MIN_SPEED : -MIN_SPEED;
+        if (fabs(rf) < MIN_SPEED && rf != 0) rf = (rf > 0) ? MIN_SPEED : -MIN_SPEED;
+
+        left_pwm = static_cast<int>(lf);
+        right_pwm = static_cast<int>(rf);
+    }
+};
 
 
 
@@ -322,8 +375,11 @@ int main(int argc, char** argv) {
     LOGI("VPSS initialized successfully");
 #endif
 
-    // 初始化电机
+    // 初始化电机、机械臂和状态机
     Motor motor;
+    Arm arm;
+    RobotState robot;
+    arm.grab_pos(); // 机械臂回到待抓取位置
     CVI_TENSOR* input;
     CVI_TENSOR* output;
     CVI_TENSOR* input_tensors;
@@ -439,53 +495,85 @@ int main(int argc, char** argv) {
         correctYoloBoxes(dets, det_num, cloned.rows, cloned.cols, height, width);
         gettimeofday(&t2, NULL);
         long postprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-        // 打印检测到的对象信息并控制电机
+        // ============ 状态机控制逻辑 ============
         if (det_num > 0) {
-            // 选择置信度最高的球
+            // 选择最大的球（最近的）
             int best_idx = 0;
-            float best_score = dets[0].score;
             for (int i = 1; i < det_num; i++) {
-                if (dets[i].score > best_score) {
-                    best_score = dets[i].score;
+                if (dets[i].bbox.w > dets[best_idx].bbox.w)
                     best_idx = i;
-                }
             }
 
             box b = dets[best_idx].bbox;
-            LOGI("[DETECT] Ball found: pos(%.1f, %.1f), conf=%.3f", b.x, b.y, dets[best_idx].score);
+            // bbox 中心坐标 → 左上角坐标 + 宽度（状态机用的是 x, w 格式）
+            int box_x = static_cast<int>(b.x - b.w / 2);
+            int box_w = static_cast<int>(b.w);
+            robot.box_x = box_x;
+            robot.box_w = box_w;
 
-            // 根据球的位置控制电机
-            controlMotor(motor, b.x, b.y, cloned.cols, cloned.rows);
-            
+            LOGI("[DETECT] Ball: x=%d, w=%d, conf=%.3f, status=%s",
+                 box_x, box_w, dets[best_idx].score, status_name(robot.status));
+
+            // 更新状态
+            robot.update_status();
+
+            if (robot.status == STATUS_GRAB_TENNIS) {
+                // 抓取状态：刹车，确认后抓
+                motor.brake();
+                robot.grab_confirm_count++;
+                LOGI("[GRAB] confirm %d/%d", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD);
+
+                if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
+                    LOGI("[ARM] Grabbing!");
+                    arm.grab();
+                    usleep(1000 * 1000);
+                    // 抓完回到待命
+                    arm.release_pos();
+                    robot.grab_confirm_count = 0;
+                    robot.status = STATUS_CHASE_TENNIS;
+                    arm.grab_pos();
+                }
+            } else if (robot.status == STATUS_POSITION_TENNIS) {
+                // 精确对准：只做左右微调
+                robot.grab_confirm_count = 0;
+                if (box_x < X_LEFT_GRAB) {
+                    LOGD("[MOTOR] position: turn left (x=%d < %d)", box_x, X_LEFT_GRAB);
+                    motor.left(MIN_SPEED);
+                } else if (box_x > X_RIGHT_GRAB) {
+                    LOGD("[MOTOR] position: turn right (x=%d > %d)", box_x, X_RIGHT_GRAB);
+                    motor.right(MIN_SPEED);
+                }
+            } else {
+                // 追球：P 控制差速驱动
+                robot.grab_confirm_count = 0;
+                int left_pwm, right_pwm;
+                robot.calc_motor_speed(left_pwm, right_pwm);
+                LOGD("[MOTOR] chase: L=%d R=%d", left_pwm, right_pwm);
+                motor.drive(left_pwm, right_pwm);
+            }
+
 #if ENABLE_DRAW_BBOX
-            // draw bbox on image (only when ball detected)
             for (int i = 0; i < det_num; i++) {
                 box b = dets[i].bbox;
-                // xywh2xyxy
                 int x1 = (b.x - b.w / 2);
                 int y1 = (b.y - b.h / 2);
                 int x2 = (b.x + b.w / 2);
                 int y2 = (b.y + b.h / 2);
-
-                // 确保坐标在图像范围内
                 x1 = std::max(0, std::min(x1, cloned.cols - 1));
                 y1 = std::max(0, std::min(y1, cloned.rows - 1));
                 x2 = std::max(0, std::min(x2, cloned.cols - 1));
                 y2 = std::max(0, std::min(y2, cloned.rows - 1));
-
                 cv::rectangle(cloned, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(0, 255, 255), 3, 8, 0);
                 char content[100];
                 sprintf(content, "%s %0.3f", tennis_names[dets[i].cls], dets[i].score);
-                cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255),
-                            2);
+                cv::putText(cloned, content, cv::Point(x1, y1 - 10), cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 255), 2);
             }
 #endif
 
-
         } else {
-            LOGI("[DETECT] No ball detected");
-            LOGI("[MOTOR] STANDBY");
-            motor.standby();
+            LOGI("[DETECT] No ball detected, idling (turn right)");
+            robot.grab_confirm_count = 0;
+            motor.right(IDLE_SPEED);  // 没看到球就原地右转找球
         }
         
 #if ENABLE_SAVE_IMAGE

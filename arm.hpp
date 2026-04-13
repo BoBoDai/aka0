@@ -1,0 +1,35 @@
+#ifndef ARM_HPP
+#define ARM_HPP
+
+#include <string>
+
+class Arm {
+  public:
+    Arm(const std::string& port = "/dev/ttyS2", int baudrate = 115200);
+    ~Arm();
+
+    void set_angle(int servo_id, float angle, int time_ms = 1000);
+    void release_torque(int servo_id = 255);
+    void restore_torque(int servo_id = 255);
+
+    void grab();
+    void release();
+    void release_pos();
+    void grab_pos();  // 收回到待抓取位置（home）
+
+  private:
+    void open_serial(const std::string& port, int baudrate);
+    void close_serial();
+    void send_command(const std::string& cmd);
+    int angle_to_pulse(float angle) const;
+
+    int fd_;
+
+    static const float ID2_ANGLE_OPEN;
+    static const float ID2_ANGLE_CLOSE;
+    static const int PULSE_MIN = 500;
+    static const int PULSE_MAX = 2500;
+    static const float ANGLE_MAX;
+};
+
+#endif // ARM_HPP
