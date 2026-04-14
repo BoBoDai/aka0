@@ -16,6 +16,7 @@ class Arm {
     void release();
     void release_pos();
     void grab_pos();  // 收回到待抓取位置（home）
+    void show();      // 抬起展示球
 
   private:
     void open_serial(const std::string& port, int baudrate);

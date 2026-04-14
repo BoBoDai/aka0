@@ -123,16 +123,16 @@ void Arm::grab() {
     LOGI("[ARM] Grab sequence start");
     // 张开夹爪
     set_angle(2, ID2_ANGLE_OPEN);
-    usleep(300 * 1000);
+    usleep(500 * 1000);
 
-    // 伸到球的位置
+    // 伸到球的位置（1号舵机放下）
     set_angle(0, 240);
-    set_angle(1, 90);
-    usleep(1000 * 1000);
+    set_angle(1, 30);
+    usleep(1500 * 1000);
 
     // 闭合夹爪
     set_angle(2, ID2_ANGLE_CLOSE);
-    usleep(1000 * 1000);
+    usleep(1500 * 1000);
 
     LOGI("[ARM] Grab sequence done");
 }
@@ -150,8 +150,15 @@ void Arm::release() {
 }
 
 void Arm::grab_pos() {
-    LOGI("[ARM] Moving to home/ready position");
+    LOGI("[ARM] Moving to home/ready position (raised, not blocking camera)");
     set_angle(0, 240);
-    set_angle(1, 90);
+    set_angle(1, 220);  // 抬高，不挡摄像头
     set_angle(2, ID2_ANGLE_OPEN);
+}
+
+void Arm::show() {
+    LOGI("[ARM] Showing ball - lifting up high");
+    set_angle(0, 240);
+    set_angle(1, 250);  // 抬高展示
+    set_angle(2, ID2_ANGLE_CLOSE);
 }

@@ -71,3 +71,18 @@ install(TARGETS tennis DESTINATION samples_extra/bin)
 
 # Arm test utility (no SDK dependencies needed)
 add_executable(arm_test arm_test.cpp arm.cpp)
+
+# Motor test utility (no SDK dependencies needed)
+add_executable(motor_test motor_test.cpp motor.cpp)
+
+# Single-frame capture utility
+add_executable(capture capture.cpp vi_capture.cpp)
+target_link_libraries(capture
+    ${CVI_LIBS}
+    ${OPENCV_LIBS}
+    -Wl,--start-group
+    sample isp isp_algo ae awb af
+    vpu cvi_ispd2 cvi_bin_isp cvi_bin
+    sns_full sys ini json-c
+    -Wl,--end-group
+    ${EXTRA_LIBS})
