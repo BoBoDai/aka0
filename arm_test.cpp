@@ -1,39 +1,69 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <cstring>
+#include <string.h>
 #include "arm.hpp"
 
-int main(int argc, char** argv) {
-    if (argc < 3) {
-        printf("Usage:\n");
-        printf("  %s <servo_id> <angle> [time_ms]  - set angle\n", argv[0]);
-        printf("  %s grab                           - test grab\n", argv[0]);
-        printf("  %s release                        - test release\n", argv[0]);
-        printf("  %s release_pos                    - test release position\n", argv[0]);
-        printf("\nExamples:\n");
-        printf("  %s 0 180       - servo 0 to 180 degrees\n", argv[0]);
-        printf("  %s 1 90 500    - servo 1 to 90 degrees in 500ms\n", argv[0]);
-        printf("  %s grab         - run grab sequence\n", argv[0]);
-        return 0;
-    }
-
+int main() {
     Arm arm;
 
-    if (strcmp(argv[1], "grab") == 0) {
-        printf("Testing grab...\n");
-        arm.grab();
-    } else if (strcmp(argv[1], "release") == 0) {
-        printf("Testing release...\n");
-        arm.release();
-    } else if (strcmp(argv[1], "release_pos") == 0) {
-        printf("Testing release_pos...\n");
-        arm.release_pos();
-    } else {
-        int servo_id = atoi(argv[1]);
-        float angle = atof(argv[2]);
-        int time_ms = argc > 3 ? atoi(argv[3]) : 1000;
-        printf("Servo %d -> angle %.1f, %dms\n", servo_id, angle, time_ms);
-        arm.set_angle(servo_id, angle, time_ms);
+    printf("=== 三个舵机角度调试工具 ===\n");
+    printf("输入格式: 角度0 角度1 角度2\n");
+    printf("  角度范围: 0~270\n");
+    printf("  输入 q 退出\n");
+    printf("  输入 grab / release / show / pos 测试预设动作\n\n");
+
+    float a0 = 240, a1 = 220, a2 = 150;
+    printf("初始位置: %.0f %.0f %.0f\n", a0, a1, a2);
+    arm.set_angle(0, a0);
+    arm.set_angle(1, a1);
+    arm.set_angle(2, a2);
+
+    char line[128];
+    while (true) {
+        printf("> ");
+        fflush(stdout);
+        if (!fgets(line, sizeof(line), stdin)) break;
+
+        // trim newline
+        line[strcspn(line, "\n")] = 0;
+
+        if (line[0] == 'q' && (line[1] == 0 || line[1] == '\n')) {
+            printf("Bye\n");
+            break;
+        }
+
+        if (strcmp(line, "grab") == 0) {
+            printf("Executing grab...\n");
+            arm.grab();
+            continue;
+        }
+        if (strcmp(line, "release") == 0) {
+            printf("Releasing gripper...\n");
+            arm.release();
+            continue;
+        }
+        if (strcmp(line, "show") == 0) {
+            printf("Showing ball...\n");
+            arm.show();
+            continue;
+        }
+        if (strcmp(line, "pos") == 0) {
+            printf("Moving to grab_pos...\n");
+            arm.grab_pos();
+            continue;
+        }
+
+        float n0, n1, n2;
+        if (sscanf(line, "%f %f %f", &n0, &n1, &n2) != 3) {
+            printf("格式错误，请输入: 角度0 角度1 角度2\n");
+            continue;
+        }
+
+        a0 = n0; a1 = n1; a2 = n2;
+        printf("servo 0=%.0f 1=%.0f 2=%.0f\n", a0, a1, a2);
+        arm.set_angle(0, a0);
+        arm.set_angle(1, a1);
+        arm.set_angle(2, a2);
     }
 
     return 0;

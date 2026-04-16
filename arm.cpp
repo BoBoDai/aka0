@@ -11,6 +11,13 @@ const float Arm::ID2_ANGLE_OPEN = 150.0f;
 const float Arm::ID2_ANGLE_CLOSE = 90.0f;
 const float Arm::ANGLE_MAX = 270.0f;
 
+const float Arm::SERVO0_READY = 200.0f;
+const float Arm::SERVO1_READY = 75.0f;
+const float Arm::SERVO0_GRAB = 235.0f;
+const float Arm::SERVO1_GRAB = 60.0f;
+const float Arm::SERVO0_LIFT = 200.0f;
+const float Arm::SERVO1_LIFT = 60.0f;
+
 Arm::Arm(const std::string& port, int baudrate) : fd_(-1) {
     open_serial(port, baudrate);
 }
@@ -119,28 +126,34 @@ void Arm::restore_torque(int servo_id) {
 }
 
 // Grab sequence - angles calibrated for current arm setup
+// 初始: 0=200 1=75 2=150(打开)
+// 抓球: 0=235 1=60 2=150(打开) → 2=90(闭合) → 0=200 1=60 2=90(抬起)
 void Arm::grab() {
     LOGI("[ARM] Grab sequence start");
-    // 张开夹爪
+
+    // 1. 伸下去，爪子打开
+    set_angle(0, SERVO0_GRAB);
+    set_angle(1, SERVO1_GRAB);
     set_angle(2, ID2_ANGLE_OPEN);
-    usleep(500 * 1000);
-
-    // 伸到球的位置（1号舵机放下）
-    set_angle(0, 240);
-    set_angle(1, 30);
     usleep(1500 * 1000);
 
-    // 闭合夹爪
+    // 2. 爪子闭合
     set_angle(2, ID2_ANGLE_CLOSE);
-    usleep(1500 * 1000);
+    usleep(1000 * 1000);
+
+    // 3. 抬起，爪子夹紧
+    set_angle(0, SERVO0_LIFT);
+    set_angle(1, SERVO1_LIFT);
+    // 2保持闭合
+    usleep(1000 * 1000);
 
     LOGI("[ARM] Grab sequence done");
 }
 
 void Arm::release_pos() {
     LOGI("[ARM] Moving to release position");
-    set_angle(0, 140);
-    set_angle(1, 220);
+    set_angle(0, SERVO0_LIFT);
+    set_angle(1, SERVO1_LIFT);
     set_angle(2, ID2_ANGLE_CLOSE);
 }
 
@@ -151,14 +164,14 @@ void Arm::release() {
 
 void Arm::grab_pos() {
     LOGI("[ARM] Moving to home/ready position (raised, not blocking camera)");
-    set_angle(0, 240);
-    set_angle(1, 220);  // 抬高，不挡摄像头
+    set_angle(0, SERVO0_READY);
+    set_angle(1, SERVO1_READY);
     set_angle(2, ID2_ANGLE_OPEN);
 }
 
 void Arm::show() {
     LOGI("[ARM] Showing ball - lifting up high");
-    set_angle(0, 240);
-    set_angle(1, 250);  // 抬高展示
+    set_angle(0, SERVO0_LIFT);
+    set_angle(1, SERVO1_LIFT);
     set_angle(2, ID2_ANGLE_CLOSE);
 }

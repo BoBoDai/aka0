@@ -31,6 +31,13 @@ class Arm {
     static const int PULSE_MIN = 500;
     static const int PULSE_MAX = 2500;
     static const float ANGLE_MAX;
+
+    static const float SERVO0_READY;
+    static const float SERVO1_READY;
+    static const float SERVO0_GRAB;
+    static const float SERVO1_GRAB;
+    static const float SERVO0_LIFT;
+    static const float SERVO1_LIFT;
 };
 
 #endif // ARM_HPP

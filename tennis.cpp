@@ -22,8 +22,8 @@
 
 // 控制宏定义
 //#define ENABLE_DEBUG_OUTPUT 0 // Replaced by LOGD
-#define ENABLE_DRAW_BBOX 1    // 是否画框并保存图片
-#define ENABLE_SAVE_IMAGE 1   // 是否保存检测结果图片
+#define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
+#define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
 
 typedef struct {
     float x, y, w, h;
@@ -263,10 +263,13 @@ static const int FRAME_WIDTH       = 640;
 static const float GRAB_AREA       = 0.40f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
 static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 内算居中
 static const int CHASE_SPEED       = 56;     // 追球前进速度
-static const int TURN_SPEED        = 18;     // 原地转向速度（数值越大越慢）
+static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
 static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
 static const int TURN_PULSE_US     = 150 * 1000;  // 每帧转向持续时间 150ms
 static const int GRAB_CONFIRM_THRESHOLD = 5;
+static const int GRAB_LEFT_TURN_SPEED = 18;       // 抓取前左转补偿速度（数值越小越慢）
+static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
+static const int GRAB_LEFT_TURN_COUNT = 5;          // 左转补偿次数
 
 struct RobotState {
     RobotStatus status;
@@ -464,18 +467,30 @@ int main(int argc, char** argv) {
             bool centered = abs(offset) <= CENTER_MARGIN;
 
             if (area_ratio >= GRAB_AREA && centered) {
-                // 球足够近且居中 → 抓取
+                // 球足够近且居中 → 确认计数
                 robot.grab_confirm_count++;
                 LOGI("[GRAB] confirm %d/%d (area=%.3f cx=%d)", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD, area_ratio, ball_cx);
                 motor.standby();
 
                 if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
+                    LOGI("[ARM] Confirmed, compensating gripper offset...");
+
+                    // 爪子偏右，连续多次左转补偿
+                    for (int i = 0; i < GRAB_LEFT_TURN_COUNT; i++) {
+                        LOGI("[GRAB] Left turn compensation %d/%d (%dms)", i + 1, GRAB_LEFT_TURN_COUNT, GRAB_LEFT_TURN_US / 1000);
+                        motor.drive(-GRAB_LEFT_TURN_SPEED, GRAB_LEFT_TURN_SPEED);
+                        usleep(GRAB_LEFT_TURN_US);
+                        motor.standby();
+                        usleep(100 * 1000);  // 间隔100ms
+                    }
+
                     LOGI("[ARM] Full grab sequence");
-                    motor.standby();
+
+                    // 抓取: 伸下→夹紧→抬起→停2秒
                     arm.grab();
-                    usleep(1000 * 1000);
-                    arm.show();
                     usleep(2000 * 1000);
+
+                    // 松开→复位
                     arm.release();
                     usleep(1000 * 1000);
                     arm.grab_pos();
