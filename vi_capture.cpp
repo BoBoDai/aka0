@@ -271,8 +271,8 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
              
              gettimeofday(&t2, NULL);
              cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
-             printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n", 
-                    get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0);
+             //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize+CvB: %.1fms, Cvt: %.1fms (VPSSDirect+Cache)\n", 
+             //       get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0);
                     
              CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);
              CVI_VI_ReleaseChnFrame(0, chn, &stVideoFrame);
@@ -308,8 +308,8 @@ int VICapture::getFrameAsBGR(CVI_U8 chn, cv::Mat& bgr_image) {
         gettimeofday(&t2, NULL);
         cvt_us = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
 
-        printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n", 
-               get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0, stride_y);
+        //printf("[VI-DETAIL] GetFrame: %.1fms, VPSS_Resize: %.1fms, Cvt: %.1fms (Stride=%d)\n", 
+        //       get_frame_us / 1000.0, resize_us / 1000.0, cvt_us / 1000.0, stride_y);
 
         CVI_SYS_Munmap(vir_addr, image_size);
         CVI_VPSS_ReleaseChnFrame(m_VpssGrp, m_VpssChn, &stResizedFrame);

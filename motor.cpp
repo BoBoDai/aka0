@@ -125,11 +125,11 @@ void Motor::drive(int left_speed, int right_speed) {
     }
     // 右轮
     if (right_speed > 0) {
-        set_speed(RIGHT_WHEEL_FORWARD, right_speed);
+        set_speed(RIGHT_WHEEL_FORWARD, right_speed + 2);
         set_pwm_enable(RIGHT_WHEEL_FORWARD, true);
         set_pwm_enable(RIGHT_WHEEL_BACKWARD, false);
     } else if (right_speed < 0) {
-        set_speed(RIGHT_WHEEL_BACKWARD, -right_speed);
+        set_speed(RIGHT_WHEEL_BACKWARD, -right_speed + 2);
         set_pwm_enable(RIGHT_WHEEL_BACKWARD, true);
         set_pwm_enable(RIGHT_WHEEL_FORWARD, false);
     } else {

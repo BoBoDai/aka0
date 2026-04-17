@@ -16,7 +16,7 @@ const float Arm::SERVO1_READY = 75.0f;
 const float Arm::SERVO0_GRAB = 235.0f;
 const float Arm::SERVO1_GRAB = 60.0f;
 const float Arm::SERVO0_LIFT = 200.0f;
-const float Arm::SERVO1_LIFT = 60.0f;
+const float Arm::SERVO1_LIFT = 180.0f;
 
 Arm::Arm(const std::string& port, int baudrate) : fd_(-1) {
     open_serial(port, baudrate);
@@ -125,9 +125,13 @@ void Arm::restore_torque(int servo_id) {
     LOGD("[ARM] servo %d torque restored", servo_id);
 }
 
-// Grab sequence - angles calibrated for current arm setup
-// 初始: 0=200 1=75 2=150(打开)
-// 抓球: 0=235 1=60 2=150(打开) → 2=90(闭合) → 0=200 1=60 2=90(抬起)
+// Grab sequence - 实测校准角度
+// 初始:    0=200 1=75  2=150(开)
+// 伸下:    0=235 1=60  2=150(开)
+// 夹紧:    0=235 1=60  2=90 (闭)
+// 抬起展示: 0=200 1=180 2=90 (闭)
+// 回位:    0=200 1=75  2=90 (闭)
+// 松开:    0=200 1=75  2=150(开)
 void Arm::grab() {
     LOGI("[ARM] Grab sequence start");
 
@@ -141,10 +145,16 @@ void Arm::grab() {
     set_angle(2, ID2_ANGLE_CLOSE);
     usleep(1000 * 1000);
 
-    // 3. 抬起，爪子夹紧
+    // 3. 抬起展示
     set_angle(0, SERVO0_LIFT);
     set_angle(1, SERVO1_LIFT);
-    // 2保持闭合
+    // servo2 保持闭合
+    usleep(1000 * 1000);
+
+    // 4. 回到初始位置，爪子仍闭合
+    set_angle(0, SERVO0_READY);
+    set_angle(1, SERVO1_READY);
+    // servo2 保持闭合
     usleep(1000 * 1000);
 
     LOGI("[ARM] Grab sequence done");
@@ -152,18 +162,20 @@ void Arm::grab() {
 
 void Arm::release_pos() {
     LOGI("[ARM] Moving to release position");
-    set_angle(0, SERVO0_LIFT);
-    set_angle(1, SERVO1_LIFT);
+    set_angle(0, SERVO0_READY);
+    set_angle(1, SERVO1_READY);
     set_angle(2, ID2_ANGLE_CLOSE);
 }
 
 void Arm::release() {
     LOGI("[ARM] Releasing gripper");
+    set_angle(0, SERVO0_READY);
+    set_angle(1, SERVO1_READY);
     set_angle(2, ID2_ANGLE_OPEN);
 }
 
 void Arm::grab_pos() {
-    LOGI("[ARM] Moving to home/ready position (raised, not blocking camera)");
+    LOGI("[ARM] Moving to home/ready position");
     set_angle(0, SERVO0_READY);
     set_angle(1, SERVO1_READY);
     set_angle(2, ID2_ANGLE_OPEN);

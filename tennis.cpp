@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <inttypes.h>
+#include <signal.h>
 #include <opencv2/opencv.hpp>
 #include "cviruntime.h"
 #include "motor.hpp"
@@ -21,9 +22,20 @@
 #include "logger.hpp"
 
 // 控制宏定义
-//#define ENABLE_DEBUG_OUTPUT 0 // Replaced by LOGD
+#define ENABLE_LOG       0    // 设为1打开所有INFO输出
 #define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
 #define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
+
+#if !ENABLE_LOG
+#undef LOGI
+#undef LOGD
+#undef LOGW
+#undef LOGE
+#define LOGI(...)
+#define LOGD(...)
+#define LOGW(...)
+#define LOGE(...)
+#endif
 
 typedef struct {
     float x, y, w, h;
@@ -37,6 +49,25 @@ typedef struct {
 } detection;
 
 static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
+
+// 全局指针，用于信号处理中清理资源
+static VICapture* g_vi_capture = nullptr;
+static Motor* g_motor = nullptr;
+static CVI_MODEL_HANDLE g_model = nullptr;
+
+static void cleanup_and_exit() {
+    if (g_motor) g_motor->standby();
+#if USE_VPSS_RESIZE
+    if (g_vi_capture) g_vi_capture->deinitVpssResize();
+#endif
+    if (g_vi_capture) g_vi_capture->deinit();
+    if (g_model) CVI_NN_CleanupModel(g_model);
+}
+
+static void signal_handler(int sig) {
+    cleanup_and_exit();
+    exit(0);
+}
 
 
 static void usage(char** argv) {
@@ -265,11 +296,16 @@ static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 
 static const int CHASE_SPEED       = 56;     // 追球前进速度
 static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
 static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
-static const int TURN_PULSE_US     = 150 * 1000;  // 每帧转向持续时间 150ms
+static const float K_TURN_PULSE    = 5000.0f; // 转向脉冲系数(ms)：pulse = K * area_ratio
+static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 75ms（保证电机能动）
+static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 500ms（防止近处转过头丢球）
 static const int GRAB_CONFIRM_THRESHOLD = 5;
+static const float GRAB_AREA_MAX = 0.55f;  // area 超过此值太近，先后退
+static const int BACKWARD_SPEED = 18;      // 后退速度
+static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
 static const int GRAB_LEFT_TURN_SPEED = 18;       // 抓取前左转补偿速度（数值越小越慢）
 static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
-static const int GRAB_LEFT_TURN_COUNT = 5;          // 左转补偿次数
+static const int GRAB_LEFT_TURN_COUNT = 4;          // 左转补偿次数
 
 struct RobotState {
     RobotStatus status;
@@ -287,6 +323,10 @@ int main(int argc, char** argv) {
     int ret = 0;
     CVI_MODEL_HANDLE model;
 
+    // 注册信号处理，确保 Ctrl-C 时清理硬件资源
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
     if (argc < 2 || argc > 3) {
         usage(argv);
         exit(-1);
@@ -297,16 +337,18 @@ int main(int argc, char** argv) {
         vi_channel = atoi(argv[2]);
     }
 
-    LOGI("Using VI channel: %d", vi_channel);
+    // 清理上次异常退出残留的硬件资源
+    {
+        VICapture cleanup_vi;
+        cleanup_vi.deinit();  // 无操作或释放残留资源
+    }
 
     // Initialize VI system
     VICapture vi_capture;
-    LOGI("Initializing VI system...");
+    g_vi_capture = &vi_capture;
     if (vi_capture.init() != CVI_SUCCESS) {
-        LOGE("Failed to initialize VI system");
         exit(-1);
     }
-    LOGI("VI system initialized successfully");
 
     // Wait for sensor to stabilize
     usleep(500 * 1000);
@@ -324,6 +366,7 @@ int main(int argc, char** argv) {
 
     // 初始化电机、机械臂和状态机
     Motor motor;
+    g_motor = &motor;
     Arm arm;
     RobotState robot;
     arm.grab_pos(); // 机械臂回到待抓取位置
@@ -342,8 +385,8 @@ int main(int argc, char** argv) {
     float conf_thresh = 0.5;
     float iou_thresh = 0.5;
     ret = CVI_NN_RegisterModel(argv[1], &model);
+    g_model = model;
     if (ret != CVI_RC_SUCCESS) {
-        LOGE("CVI_NN_RegisterModel failed, err %d", ret);
         exit(1);
     }
     LOGI("CVI_NN_RegisterModel succeeded");
@@ -466,13 +509,33 @@ int main(int argc, char** argv) {
             int offset = ball_cx - center;
             bool centered = abs(offset) <= CENTER_MARGIN;
 
+            // 动态脉冲时间：area 越大脉冲越长，避免远距离转过头
+            int pulse_us = std::max(TURN_PULSE_MIN, std::min(TURN_PULSE_MAX, (int)(K_TURN_PULSE * area_ratio * 1000)));
+
             if (area_ratio >= GRAB_AREA && centered) {
                 // 球足够近且居中 → 确认计数
                 robot.grab_confirm_count++;
                 LOGI("[GRAB] confirm %d/%d (area=%.3f cx=%d)", robot.grab_confirm_count, GRAB_CONFIRM_THRESHOLD, area_ratio, ball_cx);
-                motor.standby();
+
+                if (area_ratio >= GRAB_AREA_MAX) {
+                    // 太近了，微微后退
+                    LOGI("[GRAB] Too close (area=%.3f > %.3f), backing up", area_ratio, GRAB_AREA_MAX);
+                    motor.backward(BACKWARD_SPEED);
+                    usleep(BACKWARD_PULSE_US);
+                    motor.standby();
+                } else {
+                    motor.standby();
+                }
 
                 if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
+                    // 太近后退一步再抓
+                    if (area_ratio >= GRAB_AREA_MAX) {
+                        LOGI("[GRAB] Backing up before grab");
+                        motor.backward(BACKWARD_SPEED);
+                        usleep(BACKWARD_PULSE_US);
+                        motor.standby();
+                    }
+
                     LOGI("[ARM] Confirmed, compensating gripper offset...");
 
                     // 爪子偏右，连续多次左转补偿
@@ -501,13 +564,13 @@ int main(int argc, char** argv) {
             } else if (area_ratio >= GRAB_AREA && !centered) {
                 // 球够近但没居中 → 原地微调（脉冲式），不前进
                 robot.grab_confirm_count = 0;
-                LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, adjusting", area_ratio, ball_cx);
+                LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
                 if (offset < 0) {
                     motor.drive(-TURN_SPEED, TURN_SPEED);
                 } else {
                     motor.drive(TURN_SPEED, -TURN_SPEED);
                 }
-                usleep(TURN_PULSE_US);
+                usleep(pulse_us);
                 motor.standby();
             } else {
                 // 追球
@@ -517,13 +580,13 @@ int main(int argc, char** argv) {
                 if (!centered) {
                     // 球偏左或偏右 → 差速原地转向（脉冲式）
                     if (offset < 0) {
-                        LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d)", ball_cx, offset);
+                        LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         motor.drive(-TURN_SPEED, TURN_SPEED);
                     } else {
-                        LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d)", ball_cx, offset);
+                        LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         motor.drive(TURN_SPEED, -TURN_SPEED);
                     }
-                    usleep(TURN_PULSE_US);
+                    usleep(pulse_us);
                     motor.standby();
                 } else {
                     // 球基本居中 → 前进
@@ -563,9 +626,7 @@ int main(int argc, char** argv) {
             LOGI("[DETECT] No ball detected, searching...");
             robot.grab_confirm_count = 0;
             robot.status = STATUS_CHASE_TENNIS;
-            motor.drive(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就原地右转搜索（双轮）
-            usleep(TURN_PULSE_US);
-            motor.standby();
+            motor.drive(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
         }
         
 #if ENABLE_SAVE_IMAGE
@@ -587,26 +648,14 @@ int main(int argc, char** argv) {
         total_time_us += frame_time_us;
         float avg_fps = 1000000.0f * frame_count / total_time_us;
 
-        LOGI("[FPS] Current: %.2f, Average: %.2f (total: %.2f ms)", fps, avg_fps, frame_time_us / 1000.0f);
-        LOGD("[PROFILE] Read: %.2f ms, Preprocess: %.2f ms, Inference: %.2f ms, "
-               "Postprocess: %.2f ms",
-               read_time / 1000.0f, preprocess_time / 1000.0f, inference_time / 1000.0f, postprocess_time / 1000.0f);
+        printf("[FPS] %.2f  avg: %.2f  (%.1fms)\n", fps, avg_fps, frame_time_us / 1000.0f);
 
-        // 每处理完一张图片，休眠一段时间再处理下一张
-        // usleep(500000); // 休眠0.5秒
-        if (frame_idx >= 200) {
-            break;
-        }
+        // 持续运行，无帧数限制
+        // if (frame_idx >= 200) break;
     } // end while loop
 
     // Cleanup
-    printf("\nCleaning up...\n");
-#if USE_VPSS_RESIZE
-    vi_capture.deinitVpssResize();
-#endif
-    vi_capture.deinit();
-    CVI_NN_CleanupModel(model);
-    printf("CVI_NN_CleanupModel succeeded\n");
+    cleanup_and_exit();
     free(output_shape);
     return 0;
 }
