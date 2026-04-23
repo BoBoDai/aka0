@@ -24,7 +24,7 @@
 
 VICapture::VICapture() {
 #if USE_VPSS_RESIZE
-    m_VpssGrp = 0;
+    m_VpssGrp = 1;
     m_VpssChn = 0;
     m_bVpssInited = false;
 #endif
@@ -126,12 +126,23 @@ int VICapture::initVpssResize(int input_w, int input_h, int output_w, int output
     stVpssGrpAttr.u32MaxH = input_h;
     stVpssGrpAttr.u8VpssDev = 0;
 
-    // Create and start VPSS group
-    s32Ret = CVI_VPSS_CreateGrp(m_VpssGrp, &stVpssGrpAttr);
-    if (s32Ret != CVI_SUCCESS) {
-        LOGE("CVI_VPSS_CreateGrp failed: 0x%x", s32Ret);
-        return s32Ret;
+    // Try to find an available VPSS group (start from 0, try up to 4)
+    bool created = false;
+    for (int try_grp = 0; try_grp < 4 && !created; try_grp++) {
+        m_VpssGrp = try_grp;
+        s32Ret = CVI_VPSS_CreateGrp(m_VpssGrp, &stVpssGrpAttr);
+        if (s32Ret == CVI_SUCCESS) {
+            created = true;
+        } else {
+            LOGW("CVI_VPSS_CreateGrp(%d) failed: 0x%x, trying next group", try_grp, s32Ret);
+            CVI_VPSS_ResetGrp(try_grp);
+        }
     }
+    if (!created) {
+        LOGE("CVI_VPSS_CreateGrp failed for groups 0-3");
+        return CVI_FAILURE;
+    }
+    LOGI("VPSS group %d created successfully", m_VpssGrp);
 
     // Set channel attribute for resize output
     memset(&stVpssChnAttr, 0, sizeof(VPSS_CHN_ATTR_S));

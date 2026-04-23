@@ -55,6 +55,12 @@ static VICapture* g_vi_capture = nullptr;
 static Motor* g_motor = nullptr;
 static CVI_MODEL_HANDLE g_model = nullptr;
 
+static volatile sig_atomic_t g_running = 1;
+
+static void signal_handler(int sig) {
+    g_running = 0;
+}
+
 static void cleanup_and_exit() {
     if (g_motor) g_motor->standby();
 #if USE_VPSS_RESIZE
@@ -62,11 +68,6 @@ static void cleanup_and_exit() {
 #endif
     if (g_vi_capture) g_vi_capture->deinit();
     if (g_model) CVI_NN_CleanupModel(g_model);
-}
-
-static void signal_handler(int sig) {
-    cleanup_and_exit();
-    exit(0);
 }
 
 
@@ -340,7 +341,10 @@ int main(int argc, char** argv) {
     // 清理上次异常退出残留的硬件资源
     {
         VICapture cleanup_vi;
-        cleanup_vi.deinit();  // 无操作或释放残留资源
+        cleanup_vi.deinit();
+#if USE_VPSS_RESIZE
+        cleanup_vi.deinitVpssResize();
+#endif
     }
 
     // Initialize VI system
@@ -422,7 +426,7 @@ int main(int argc, char** argv) {
 
     cv::setNumThreads(1);
 
-    while (true) {
+    while (g_running) {
         gettimeofday(&start_time, NULL);
 
         frame_idx++;
@@ -651,7 +655,7 @@ int main(int argc, char** argv) {
         printf("[FPS] %.2f  avg: %.2f  (%.1fms)\n", fps, avg_fps, frame_time_us / 1000.0f);
 
         // 持续运行，无帧数限制
-        if (frame_idx >= 50) break;
+        // if (frame_idx >= 50) break;
     } // end while loop
 
     // Cleanup
