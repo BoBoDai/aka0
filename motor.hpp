@@ -6,6 +6,7 @@
 class Motor {
   public:
     Motor();
+    explicit Motor(const std::string& config_path);
     ~Motor();
 
     void forward(int speed);
@@ -22,15 +23,17 @@ class Motor {
     void set_pwm_enable(int pwm_id, bool enable);
     void set_speed(int pwm_id, int speed);
     void init_pwm(int pwm_id);
+    void load_config(const std::string& config_path);
+    int parse_int_from_json(const char* json_str, const char* key);
 
     const std::string PWM_PATH = "/sys/class/pwm/pwmchip4/";
     const int PERIOD = 10000; // 10kHz
 
-    // PWM IDs for left and right wheels
-    const int LEFT_WHEEL_BACKWARD = 0;
-    const int LEFT_WHEEL_FORWARD = 1;
-    const int RIGHT_WHEEL_BACKWARD = 2;
-    const int RIGHT_WHEEL_FORWARD = 3;
+    // PWM IDs for left and right wheels (loaded from JSON config)
+    int LEFT_WHEEL_BACKWARD;
+    int LEFT_WHEEL_FORWARD;
+    int RIGHT_WHEEL_BACKWARD;
+    int RIGHT_WHEEL_FORWARD;
 };
 
 #endif // MOTOR_HPP

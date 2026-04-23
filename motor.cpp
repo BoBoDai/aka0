@@ -2,12 +2,69 @@
 #include <fstream>
 #include <iostream>
 #include <unistd.h>
+#include <cstring>
 
-Motor::Motor() {
+// Default config path - 使用相对路径，项目目录下
+const std::string DEFAULT_PWM_CONFIG = "/root/AKA-00/pwm_channels.json";
+
+Motor::Motor() : LEFT_WHEEL_BACKWARD(0), LEFT_WHEEL_FORWARD(1),
+                 RIGHT_WHEEL_BACKWARD(2), RIGHT_WHEEL_FORWARD(3) {
+    load_config(DEFAULT_PWM_CONFIG);
     init_pwm(LEFT_WHEEL_BACKWARD);
     init_pwm(LEFT_WHEEL_FORWARD);
     init_pwm(RIGHT_WHEEL_BACKWARD);
     init_pwm(RIGHT_WHEEL_FORWARD);
+}
+
+Motor::Motor(const std::string& config_path) : LEFT_WHEEL_BACKWARD(0), LEFT_WHEEL_FORWARD(1),
+                 RIGHT_WHEEL_BACKWARD(2), RIGHT_WHEEL_FORWARD(3) {
+    load_config(config_path);
+    init_pwm(LEFT_WHEEL_BACKWARD);
+    init_pwm(LEFT_WHEEL_FORWARD);
+    init_pwm(RIGHT_WHEEL_BACKWARD);
+    init_pwm(RIGHT_WHEEL_FORWARD);
+}
+
+int Motor::parse_int_from_json(const char* json_str, const char* key) {
+    char pattern[64];
+    snprintf(pattern, sizeof(pattern), "\"%s\":", key);
+    const char* p = strstr(json_str, pattern);
+    if (p) {
+        // Move past the pattern to the start of the number
+        p += strlen(pattern);
+        // Skip whitespace
+        while (*p == ' ') p++;
+        return atoi(p);
+    }
+    return -1;
+}
+
+void Motor::load_config(const std::string& config_path) {
+    std::ifstream ifs(config_path);
+    if (!ifs.is_open()) {
+        std::cerr << "[Motor] Warning: cannot open config " << config_path
+                  << ", using defaults (0,1,2,3)" << std::endl;
+        return;
+    }
+
+    std::string json_str((std::istreambuf_iterator<char>(ifs)),
+                         std::istreambuf_iterator<char>());
+    ifs.close();
+
+    int val;
+    val = parse_int_from_json(json_str.c_str(), "left_ch1");
+    if (val >= 0) LEFT_WHEEL_BACKWARD = val;
+    val = parse_int_from_json(json_str.c_str(), "left_ch2");
+    if (val >= 0) LEFT_WHEEL_FORWARD = val;
+    val = parse_int_from_json(json_str.c_str(), "right_ch1");
+    if (val >= 0) RIGHT_WHEEL_BACKWARD = val;
+    val = parse_int_from_json(json_str.c_str(), "right_ch2");
+    if (val >= 0) RIGHT_WHEEL_FORWARD = val;
+
+    std::cout << "[Motor] Loaded PWM config: left_ch1=" << LEFT_WHEEL_BACKWARD
+              << ", left_ch2=" << LEFT_WHEEL_FORWARD
+              << ", right_ch1=" << RIGHT_WHEEL_BACKWARD
+              << ", right_ch2=" << RIGHT_WHEEL_FORWARD << std::endl;
 }
 
 Motor::~Motor() {
