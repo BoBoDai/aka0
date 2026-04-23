@@ -42,11 +42,6 @@ int main() {
             arm.release();
             continue;
         }
-        if (strcmp(line, "show") == 0) {
-            printf("Showing ball...\n");
-            arm.show();
-            continue;
-        }
         if (strcmp(line, "pos") == 0) {
             printf("Moving to grab_pos...\n");
             arm.grab_pos();
