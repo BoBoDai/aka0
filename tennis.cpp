@@ -651,7 +651,7 @@ int main(int argc, char** argv) {
         printf("[FPS] %.2f  avg: %.2f  (%.1fms)\n", fps, avg_fps, frame_time_us / 1000.0f);
 
         // 持续运行，无帧数限制
-        // if (frame_idx >= 200) break;
+        if (frame_idx >= 50) break;
     } // end while loop
 
     // Cleanup

@@ -196,10 +196,13 @@ void Arm::grab() {
     set_angle(2, SERVO2_PREPARE);
     usleep(1500 * 1000);
 
-    // 2. 抬起来，爪子闭合夹住 (servo2_approach)
+    // 2. 夹爪闭合
+    set_angle(2, SERVO2_GRAB);
+    usleep(1000 * 1000);
+
+    // 3. 抬起来
     set_angle(0, SERVO0_LIFT);
     set_angle(1, SERVO1_LIFT);
-    set_angle(2, SERVO2_APPROACH);
     usleep(1000 * 1000);
 
     LOGI("[ARM] Grab sequence done");
@@ -209,7 +212,7 @@ void Arm::release() {
     LOGI("[ARM] Releasing gripper");
     set_angle(0, SERVO0_LIFT);
     set_angle(1, SERVO1_LIFT);
-    set_angle(2, SERVO2_GRAB);
+    set_angle(2, SERVO2_PREPARE);
 }
 
 void Arm::grab_pos() {
