@@ -292,9 +292,9 @@ static const char* status_name(RobotStatus s) {
 
 // 控制参数
 static const int FRAME_WIDTH       = 640;
-static const float GRAB_AREA       = 0.40f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
+static const float GRAB_AREA       = 0.25f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
 static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 内算居中
-static const int CHASE_SPEED       = 56;     // 追球前进速度
+static const int CHASE_SPEED       = 45;     // 追球前进速度
 static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
 static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
 static const float K_TURN_PULSE    = 5000.0f; // 转向脉冲系数(ms)：pulse = K * area_ratio
