@@ -59,6 +59,13 @@ static volatile sig_atomic_t g_running = 1;
 
 static void signal_handler(int sig) {
     g_running = 0;
+    if (g_motor) g_motor->standby();
+#if USE_VPSS_RESIZE
+    if (g_vi_capture) g_vi_capture->deinitVpssResize();
+#endif
+    if (g_vi_capture) g_vi_capture->deinit();
+    if (g_model) CVI_NN_CleanupModel(g_model);
+    _exit(0);
 }
 
 static void cleanup_and_exit() {
