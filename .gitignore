@@ -1,3 +1,4 @@
 /build_riscv_debug
+/build_usb_camera
 *.o
 .idea

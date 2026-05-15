@@ -16,25 +16,40 @@
 #include "cviruntime.h"
 #include "motor.hpp"
 #include "arm.hpp"
+#ifdef USE_ESP32_UART
+#include "esp32_motor.hpp"
+#endif
 
 // VI related headers - must include base types first
+#if USE_USB_CAMERA
+#include "usb_camera_capture.hpp"
+#else
 #include "vi_capture.hpp"
+#endif
 #include "logger.hpp"
 
 // 控制宏定义
 #define ENABLE_LOG       0    // 设为1打开所有INFO输出
 #define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
 #define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
+// USE_USB_CAMERA 由 cmake -DUSE_USB_CAMERA=1 传入
+// USE_ESP32_UART 由 cmake -DUSE_ESP32_UART=1 传入，默认在此设为1：
+#ifndef USE_ESP32_UART
+#define USE_ESP32_UART 1
+#endif
 
-#if !ENABLE_LOG
-#undef LOGI
-#undef LOGD
-#undef LOGW
-#undef LOGE
-#define LOGI(...)
-#define LOGD(...)
-#define LOGW(...)
-#define LOGE(...)
+// VI related headers - must include base types first
+#if USE_USB_CAMERA
+#include "usb_camera_capture.hpp"
+#else
+#include "vi_capture.hpp"
+#endif
+#include "logger.hpp"
+#include "cviruntime.h"
+#include "motor.hpp"
+#include "arm.hpp"
+#ifdef USE_ESP32_UART
+#include "esp32_motor.hpp"
 #endif
 
 typedef struct {
@@ -48,14 +63,40 @@ typedef struct {
     int batch_idx;
 } detection;
 
-static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
+static volatile sig_atomic_t g_running = 1;
+static int g_total_frames = 0;
+static int g_total_detected = 0;
 
-// 全局指针，用于信号处理中清理资源
+#ifdef USE_ESP32_UART
+#define MOTOR_FORWARD(s)    g_esp32_motor->forward(s)
+#define MOTOR_BACKWARD(s)  g_esp32_motor->backward(s)
+#define MOTOR_LEFT(s)      g_esp32_motor->left(s)
+#define MOTOR_RIGHT(s)     g_esp32_motor->right(s)
+#define MOTOR_DRIVE(l, r)   g_esp32_motor->drive(l, r)
+#define MOTOR_STANDBY()     g_esp32_motor->standby()
+#define MOTOR_BRAKE()       g_esp32_motor->brake()
+#else
+#define MOTOR_FORWARD(s)    g_motor->forward(s)
+#define MOTOR_BACKWARD(s)  g_motor->backward(s)
+#define MOTOR_LEFT(s)      g_motor->left(s)
+#define MOTOR_RIGHT(s)     g_motor->right(s)
+#define MOTOR_DRIVE(l, r)   g_motor->drive(l, r)
+#define MOTOR_STANDBY()     g_motor->standby()
+#define MOTOR_BRAKE()       g_motor->brake()
+#endif
+
+#if USE_USB_CAMERA
+static UsbCameraCapture* g_vi_capture = nullptr;
+#else
 static VICapture* g_vi_capture = nullptr;
+#endif
 static Motor* g_motor = nullptr;
+#ifdef USE_ESP32_UART
+static Esp32Motor* g_esp32_motor = nullptr;
+#endif
 static CVI_MODEL_HANDLE g_model = nullptr;
 
-static volatile sig_atomic_t g_running = 1;
+static const char* tennis_names[] = {"tennis"}; // 单类别网球检测
 
 static void signal_handler(int sig) {
     printf("=== signal %d received, setting g_running=0 ===\n", sig);
@@ -64,8 +105,15 @@ static void signal_handler(int sig) {
 }
 
 static void cleanup_and_exit() {
+#ifdef USE_ESP32_UART
+    if (g_esp32_motor) {
+        g_esp32_motor->standby();
+        delete g_esp32_motor;
+    }
+#else
     if (g_motor) g_motor->standby();
-#if USE_VPSS_RESIZE
+#endif
+#ifndef USE_USB_CAMERA
     if (g_vi_capture) g_vi_capture->deinitVpssResize();
 #endif
     if (g_vi_capture) g_vi_capture->deinit();
@@ -75,9 +123,12 @@ static void cleanup_and_exit() {
 
 static void usage(char** argv) {
     LOGI("Usage:");
+#ifndef USE_USB_CAMERA
     LOGI("   %s cvimodel [vi_channel]", argv[0]);
     LOGI("   Example: %s model.cvimodel 0", argv[0]);
-    LOGI("   This will capture video from VI channel (default: 0)");
+#else
+    LOGI("   %s cvimodel", argv[0]);
+#endif
 }
 
 template <typename T> int argmax(const T* data, size_t len, size_t stride = 1) {
@@ -294,19 +345,19 @@ static const char* status_name(RobotStatus s) {
 
 // 控制参数
 static const int FRAME_WIDTH       = 640;
-static const float GRAB_AREA       = 0.25f;  // area_ratio >= 此值 → 抓取（提前触发抵消惯性）
-static const int CENTER_MARGIN     = 35;     // 球中心距画面中心 ±35px 内算居中
-static const int CHASE_SPEED       = 45;     // 追球前进速度
-static const int TURN_SPEED        = 18;     // 原地转向速度（数值越小越慢）
-static const int IDLE_SPEED        = 18;     // 没看到球时的搜索速度
-static const float K_TURN_PULSE    = 5000.0f; // 转向脉冲系数(ms)：pulse = K * area_ratio
-static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 75ms（保证电机能动）
-static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 500ms（防止近处转过头丢球）
+static const float GRAB_AREA       = 0.35f;  // area_ratio >= 此值 → 抓取（摄像头视角大，调高阈值）
+static const int CENTER_MARGIN     = 90;     // 球中心距画面中心 ±80px 内算居中（视野大所以放宽）
+static const int CHASE_SPEED       = 30;    // 追球前进速度 (ESP32: -100~100)
+static const int TURN_SPEED        = 27;     // 转向差速量
+static const int IDLE_SPEED        = 25;     // 没看到球时的搜索速度
+static const float K_TURN_PULSE    = 1500.0f; // 脉冲系数(ms)：pulse = K * area_ratio（调小缩短脉冲）
+static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 30ms
+static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 200ms
 static const int GRAB_CONFIRM_THRESHOLD = 5;
-static const float GRAB_AREA_MAX = 0.55f;  // area 超过此值太近，先后退
-static const int BACKWARD_SPEED = 18;      // 后退速度
+static const float GRAB_AREA_MAX = 0.50f;  // area 超过此值太近，先后退
+static const int BACKWARD_SPEED = 25;     // 后退速度
 static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
-static const int GRAB_LEFT_TURN_SPEED = 18;       // 抓取前左转补偿速度（数值越小越慢）
+static const int GRAB_LEFT_TURN_SPEED = 10;       // 抓取前左转补偿速度（数值越小越慢）
 static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
 static const int GRAB_LEFT_TURN_COUNT = 4;          // 左转补偿次数
 
@@ -330,28 +381,41 @@ int main(int argc, char** argv) {
         usage(argv);
         exit(-1);
     }
-
-    CVI_U8 vi_channel = 0; // Default VI channel
+#ifndef USE_USB_CAMERA
+    CVI_U8 vi_channel = 0; // Default VI channel (only used for MIPI CSI)
     if (argc == 3) {
         vi_channel = atoi(argv[2]);
     }
+#endif
 
+#if USE_USB_CAMERA
+    // Initialize USB camera
+    UsbCameraCapture vi_capture;
+    g_vi_capture = &vi_capture;
+    if (vi_capture.init() != 0) {
+        LOGE("USB camera init failed");
+        exit(-1);
+    }
+    LOGI("USB camera initialized");
+#else
     // 清理上次异常退出残留的硬件资源
     {
         VICapture cleanup_vi;
         cleanup_vi.deinit();  // 无操作或释放残留资源
     }
 
-    // Initialize VI system
+    // Initialize VI system (MIPI CSI)
     VICapture vi_capture;
     g_vi_capture = &vi_capture;
     if (vi_capture.init() != CVI_SUCCESS) {
         exit(-1);
     }
+#endif
 
     // Wait for sensor to stabilize
     usleep(500 * 1000);
 
+#ifndef USE_USB_CAMERA
 #if USE_VPSS_RESIZE
     // Initialize VPSS for hardware resize (2560x1440 -> 640x640)
     LOGI("Initializing VPSS for hardware resize...");
@@ -362,10 +426,21 @@ int main(int argc, char** argv) {
     }
     LOGI("VPSS initialized successfully");
 #endif
+#endif
 
     // 初始化电机、机械臂和状态机
+#ifdef USE_ESP32_UART
+    Esp32Motor* esp32_motor = new Esp32Motor("/dev/ttyS1", 115200);
+    g_esp32_motor = esp32_motor;
+    if (!esp32_motor->init()) {
+        LOGE("Esp32Motor init failed");
+        delete esp32_motor;
+        exit(-1);
+    }
+#else
     Motor motor;
     g_motor = &motor;
+#endif
     Arm arm;
     RobotState robot;
     arm.grab_pos(); // 机械臂回到待抓取位置
@@ -417,7 +492,6 @@ int main(int argc, char** argv) {
     struct timeval start_time, end_time;
     struct timeval t1, t2;
     long total_time_us = 0;
-    int frame_count = 0;
 
     cv::setNumThreads(1);
 
@@ -429,13 +503,12 @@ int main(int argc, char** argv) {
         gettimeofday(&start_time, NULL);
 
         frame_idx++;
-        LOGI("\n[Frame %d]", frame_idx);
 
         // Get YUV frame from VI and convert to BGR
         gettimeofday(&t1, NULL);
         cv::Mat image;
-        if (vi_capture.getFrameAsBGR(vi_channel, image) != CVI_SUCCESS) {
-            LOGW("Failed to get frame from VI channel %d", vi_channel);
+        if (vi_capture.getFrameAsBGR(0, image) != 0) {
+            LOGW("Failed to get frame from USB camera");
             usleep(100000); // 休眠0.1秒
             continue;
         }
@@ -452,7 +525,7 @@ int main(int argc, char** argv) {
 
         // Image is already 640x640 from vi_get_frame_as_bgr, no need to resize again
         gettimeofday(&t1, NULL);
-        
+
         // Convert BGR to RGB
         cv::cvtColor(image, image, cv::COLOR_BGR2RGB);
 
@@ -506,8 +579,9 @@ int main(int argc, char** argv) {
             robot.area_ratio = area_ratio;
             robot.ball_cx = ball_cx;
 
-            LOGI("[DETECT] area=%.3f cx=%d conf=%.3f status=%s",
-                 area_ratio, ball_cx, dets[best_idx].score, status_name(robot.status));
+            LOGI("[DETECT] area=%.3f (bbox %dx%d) cx=%d conf=%.3f status=%s",
+                 area_ratio, (int)b.w, (int)b.h, ball_cx, dets[best_idx].score, status_name(robot.status));
+            g_total_detected++;
 
             int offset = ball_cx - center;
             bool centered = abs(offset) <= CENTER_MARGIN;
@@ -523,20 +597,20 @@ int main(int argc, char** argv) {
                 if (area_ratio >= GRAB_AREA_MAX) {
                     // 太近了，微微后退
                     LOGI("[GRAB] Too close (area=%.3f > %.3f), backing up", area_ratio, GRAB_AREA_MAX);
-                    motor.backward(BACKWARD_SPEED);
+                    MOTOR_BACKWARD(BACKWARD_SPEED);
                     usleep(BACKWARD_PULSE_US);
-                    motor.standby();
+                    MOTOR_STANDBY();
                 } else {
-                    motor.standby();
+                    MOTOR_STANDBY();
                 }
 
                 if (robot.grab_confirm_count >= GRAB_CONFIRM_THRESHOLD) {
                     // 太近后退一步再抓
                     if (area_ratio >= GRAB_AREA_MAX) {
                         LOGI("[GRAB] Backing up before grab");
-                        motor.backward(BACKWARD_SPEED);
+                        MOTOR_BACKWARD(BACKWARD_SPEED);
                         usleep(BACKWARD_PULSE_US);
-                        motor.standby();
+                        MOTOR_STANDBY();
                     }
 
                     LOGI("[ARM] Confirmed, compensating gripper offset...");
@@ -544,9 +618,9 @@ int main(int argc, char** argv) {
                     // 爪子偏右，连续多次左转补偿
                     for (int i = 0; i < GRAB_LEFT_TURN_COUNT; i++) {
                         LOGI("[GRAB] Left turn compensation %d/%d (%dms)", i + 1, GRAB_LEFT_TURN_COUNT, GRAB_LEFT_TURN_US / 1000);
-                        motor.drive(-GRAB_LEFT_TURN_SPEED, GRAB_LEFT_TURN_SPEED);
+                        MOTOR_DRIVE(-GRAB_LEFT_TURN_SPEED, GRAB_LEFT_TURN_SPEED);
                         usleep(GRAB_LEFT_TURN_US);
-                        motor.standby();
+                        MOTOR_STANDBY();
                         usleep(100 * 1000);  // 间隔100ms
                     }
 
@@ -565,36 +639,40 @@ int main(int argc, char** argv) {
                     robot.status = STATUS_CHASE_TENNIS;
                 }
             } else if (area_ratio >= GRAB_AREA && !centered) {
-                // 球够近但没居中 → 原地微调（脉冲式），不前进
+                // 球够近但没居中 → 原地微调（持续控制，每帧更新目标速度）
                 robot.grab_confirm_count = 0;
-                LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
+                // LOGI("[ALIGN] area=%.3f OK but cx=%d not centered, pulse=%dms", area_ratio, ball_cx, pulse_us / 1000);
                 if (offset < 0) {
-                    motor.drive(-TURN_SPEED, TURN_SPEED);
+                    MOTOR_DRIVE(-TURN_SPEED, TURN_SPEED);
                 } else {
-                    motor.drive(TURN_SPEED, -TURN_SPEED);
+                    MOTOR_DRIVE(TURN_SPEED, -TURN_SPEED);
                 }
                 usleep(pulse_us);
-                motor.standby();
+                MOTOR_STANDBY();
             } else {
                 // 追球
                 robot.grab_confirm_count = 0;
                 robot.status = STATUS_CHASE_TENNIS;
 
                 if (!centered) {
-                    // 球偏左或偏右 → 差速原地转向（脉冲式）
+                    // 球偏左或偏右 → 持续差速转向，每帧更新目标，不停止
                     if (offset < 0) {
-                        LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
-                        motor.drive(-TURN_SPEED, TURN_SPEED);
+                        // LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        MOTOR_DRIVE(-TURN_SPEED, TURN_SPEED);
                     } else {
-                        LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
-                        motor.drive(TURN_SPEED, -TURN_SPEED);
+                        // LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
+                        MOTOR_DRIVE(TURN_SPEED, -TURN_SPEED);
                     }
                     usleep(pulse_us);
-                    motor.standby();
+                    MOTOR_STANDBY();
                 } else {
-                    // 球基本居中 → 前进
-                    LOGI("[MOTOR] FORWARD (cx=%d area=%.3f < %.3f)", ball_cx, area_ratio, GRAB_AREA);
-                    motor.forward(CHASE_SPEED);
+                    // 球居中 → 比例前进，越近越慢
+                    //float ratio = area_ratio / GRAB_AREA;
+                    //int fwd_speed = CHASE_SPEED - (int)((CHASE_SPEED - 5) * ratio);
+                    //if (fwd_speed < 5) fwd_speed = 5;
+                    //if (fwd_speed > CHASE_SPEED) fwd_speed = CHASE_SPEED;
+                    //MOTOR_FORWARD(fwd_speed);
+					MOTOR_FORWARD(CHASE_SPEED);
                 }
             }
 
@@ -627,31 +705,35 @@ int main(int argc, char** argv) {
 
         } else {
             LOGI("[DETECT] No ball detected, searching...");
+            g_total_detected += 0;  // no detection this frame
             robot.grab_confirm_count = 0;
             robot.status = STATUS_CHASE_TENNIS;
-            motor.drive(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
+            MOTOR_DRIVE(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
         }
-        
+
 #if ENABLE_SAVE_IMAGE
-            {
-                const char* save_dir = "/root/images";
-                mkdir(save_dir, 0755);  // ensure directory exists
-                char output_path[256];
-                sprintf(output_path, "%s/detected_%d.jpg", save_dir, frame_idx);
-                bool ok = cv::imwrite(output_path, cloned);
-                LOGI("[SAVE] %s %s", output_path, ok ? "OK" : "FAILED");
-            }
+        // Save every frame with bbox overlay
+        {
+            const char* save_dir = "/root/images";
+            mkdir(save_dir, 0755);  // ensure directory exists
+            char output_path[256];
+            sprintf(output_path, "%s/detected_%d.jpg", save_dir, frame_idx);
+            bool ok = cv::imwrite(output_path, cloned);
+            LOGI("[SAVE] %s %s", output_path, ok ? "OK" : "FAILED");
+        }
 #endif
+
         // 计算帧率
         gettimeofday(&end_time, NULL);
         long frame_time_us = (end_time.tv_sec - start_time.tv_sec) * 1000000 + (end_time.tv_usec - start_time.tv_usec);
         float fps = 1000000.0f / frame_time_us;
 
-        frame_count++;
+        g_total_frames++;
         total_time_us += frame_time_us;
-        float avg_fps = 1000000.0f * frame_count / total_time_us;
+        float avg_fps = 1000000.0f * g_total_frames / total_time_us;
 
-        printf("[FPS] %.2f  avg: %.2f  (%.1fms)\n", fps, avg_fps, frame_time_us / 1000.0f);
+        printf("[FPS] %.2f  avg: %.2f  (%.1fms)  frames: %d  detected: %d\n",
+               fps, avg_fps, frame_time_us / 1000.0f, g_total_frames, g_total_detected);
 
         // 持续运行，无帧数限制
         // if (frame_idx >= 3) break;
@@ -660,6 +742,7 @@ int main(int argc, char** argv) {
     // Cleanup
     cleanup_and_exit();
     free(output_shape);
-    printf("---------------------------end\n\r");
+    printf("---------------------------end\n");
+    printf("Total frames: %d, Total detected: %d\n", g_total_frames, g_total_detected);
     return 0;
 }

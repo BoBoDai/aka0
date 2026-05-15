@@ -57,7 +57,15 @@ endif()
 
 set(EXTRA_LIBS ${EXTRA_LIBS} dl stdc++ pthread z atomic)
 
-add_executable(tennis tennis.cpp motor.cpp arm.cpp vi_capture.cpp)
+add_executable(tennis tennis.cpp motor.cpp arm.cpp)
+if(USE_USB_CAMERA)
+  target_sources(tennis PRIVATE usb_camera_capture.cpp)
+else()
+  target_sources(tennis PRIVATE vi_capture.cpp)
+endif()
+if(USE_ESP32_UART)
+  target_sources(tennis PRIVATE esp32_motor.cpp)
+endif()
 target_link_libraries(tennis
     ${CVI_LIBS}
     ${OPENCV_LIBS}
@@ -86,3 +94,7 @@ target_link_libraries(capture
     sns_full sys ini json-c
     -Wl,--end-group
     ${EXTRA_LIBS})
+
+# USB camera capture module
+add_library(usb_camera_capture OBJECT usb_camera_capture.cpp)
+target_link_libraries(usb_camera_capture ${OPENCV_LIBS})
