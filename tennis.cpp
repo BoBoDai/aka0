@@ -26,12 +26,19 @@
 #else
 #include "vi_capture.hpp"
 #endif
-#include "logger.hpp"
-
-// 控制宏定义
+// 控制宏定义（必须在 logger.hpp 之前）
 #define ENABLE_LOG       0    // 设为1打开所有INFO输出
 #define ENABLE_DRAW_BBOX 0    // 是否画框并保存图片
 #define ENABLE_SAVE_IMAGE 0   // 是否保存检测结果图片
+#if ENABLE_LOG
+#undef CURRENT_LOG_LEVEL
+#define CURRENT_LOG_LEVEL LOG_LEVEL_DEBUG
+#else
+#undef CURRENT_LOG_LEVEL
+#define CURRENT_LOG_LEVEL LOG_LEVEL_WARN
+#endif
+
+#include "logger.hpp"
 // USE_USB_CAMERA 由 cmake -DUSE_USB_CAMERA=1 传入
 // USE_ESP32_UART 由 cmake -DUSE_ESP32_UART=1 传入，默认在此设为1：
 #ifndef USE_ESP32_UART
@@ -345,32 +352,33 @@ static const char* status_name(RobotStatus s) {
 
 // 控制参数
 static const int FRAME_WIDTH       = 640;
-static const float GRAB_AREA       = 0.55f;  // area_ratio >= 此值 → 抓取（摄像头视角大，调高阈值）
-static const int CENTER_MARGIN     = 90;     // 球中心距画面中心 ±80px 内算居中（视野大所以放宽）
-static const int CHASE_SPEED       = 30;    // 追球前进速度 (ESP32: -100~100)
+static const float GRAB_AREA       = 0.56f;  // area_ratio >= 此值 → 抓取（摄像头视角大，调高阈值）
+static const int CENTER_MARGIN     = 80;     // 球中心距画面中心 ±80px 内算居中（视野大所以放宽）
+static const int CHASE_SPEED       = 28;    // 追球前进速度 (ESP32: -100~100)
 static const int TURN_SPEED        = 27;     // 转向差速量
 static const int IDLE_SPEED        = 25;     // 没看到球时的搜索速度
 static const float K_TURN_PULSE    = 500.0f; // 脉冲系数：pulse = K * |offset|（偏离越多转越久）
 static const int TURN_PULSE_MIN    = 25 * 1000;  // 最小脉冲 25ms
 static const int TURN_PULSE_MAX    = 200 * 1000;  // 最大脉冲 200ms
 static const int GRAB_CONFIRM_THRESHOLD = 5;
-static const float GRAB_AREA_MAX = 0.65f;  // area 超过此值太近，先后退
+static const float GRAB_AREA_MAX = 0.68f;  // area 超过此值太近，先后退
 static const int BACKWARD_SPEED = 25;     // 后退速度
-static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
+static const int BACKWARD_PULSE_US = 15 * 1000; // 后退脉冲时间
 static const int GRAB_LEFT_TURN_SPEED = 25;       // 抓取前左转补偿速度（数值越小越慢）
 static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
-static const int GRAB_LEFT_TURN_COUNT = 2;          // 左转补偿次数
-static const int FWD_PULSE_US     = 150 * 1000; // 前进脉冲时间（每帧前进一段后停）
+static const int GRAB_LEFT_TURN_COUNT = 3;          // 左转补偿次数
+static const int FWD_PULSE_US     = 180 * 1000; // 前进脉冲时间（每帧前进一段后停）
 static const int LOST_BALL_TOLERANCE = 2;       // 丢球容忍帧数，防止短暂丢失就切搜索
 
 struct RobotState {
     RobotStatus status;
     float area_ratio;
+    float smoothed_area;  // 面积平滑值，防止突变导致速度跳变
     int ball_cx;    // 球中心 x
     int grab_confirm_count;
     int lost_ball_count;
 
-    RobotState() : status(STATUS_CHASE_TENNIS), area_ratio(0), ball_cx(0), grab_confirm_count(0), lost_ball_count(0) {}
+    RobotState() : status(STATUS_CHASE_TENNIS), area_ratio(0), smoothed_area(0), ball_cx(0), grab_confirm_count(0), lost_ball_count(0) {}
 };
 
 
@@ -581,6 +589,8 @@ int main(int argc, char** argv) {
             int center = FRAME_WIDTH / 2;
 
             robot.area_ratio = area_ratio;
+            // EMA 平滑，防止面积突变导致速度跳变
+            robot.smoothed_area = 0.6f * robot.smoothed_area + 0.4f * area_ratio;
             robot.ball_cx = ball_cx;
 
             LOGI("[DETECT] area=%.3f (bbox %dx%d) cx=%d conf=%.3f status=%s",
@@ -668,18 +678,9 @@ int main(int argc, char** argv) {
                     usleep(pulse_us);
                     MOTOR_STANDBY();
                 } else {
-                    // 球居中 → 比例前进
-                    float ratio = area_ratio / GRAB_AREA;
-                    int fwd_speed = CHASE_SPEED - (int)((CHASE_SPEED - 25) * ratio);
-                    if (fwd_speed < 25) fwd_speed = 25;
-                    if (fwd_speed > CHASE_SPEED) fwd_speed = CHASE_SPEED;
-                    MOTOR_FORWARD(fwd_speed);
-                    if (fwd_speed > 26) {
-                        // 高速时脉冲式防止冲过
-                        usleep(FWD_PULSE_US);
-                        MOTOR_STANDBY();
-                    }
-                    // 低速时持续前进，保证靠近球时不卡住
+					MOTOR_FORWARD(CHASE_SPEED);
+					usleep(FWD_PULSE_US);
+                    MOTOR_STANDBY();
                 }
             }
 
