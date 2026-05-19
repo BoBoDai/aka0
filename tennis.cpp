@@ -345,29 +345,32 @@ static const char* status_name(RobotStatus s) {
 
 // 控制参数
 static const int FRAME_WIDTH       = 640;
-static const float GRAB_AREA       = 0.35f;  // area_ratio >= 此值 → 抓取（摄像头视角大，调高阈值）
+static const float GRAB_AREA       = 0.55f;  // area_ratio >= 此值 → 抓取（摄像头视角大，调高阈值）
 static const int CENTER_MARGIN     = 90;     // 球中心距画面中心 ±80px 内算居中（视野大所以放宽）
 static const int CHASE_SPEED       = 30;    // 追球前进速度 (ESP32: -100~100)
 static const int TURN_SPEED        = 27;     // 转向差速量
 static const int IDLE_SPEED        = 25;     // 没看到球时的搜索速度
-static const float K_TURN_PULSE    = 1500.0f; // 脉冲系数(ms)：pulse = K * area_ratio（调小缩短脉冲）
-static const int TURN_PULSE_MIN    = 75 * 1000;  // 最小脉冲 30ms
-static const int TURN_PULSE_MAX    = 500 * 1000;  // 最大脉冲 200ms
+static const float K_TURN_PULSE    = 500.0f; // 脉冲系数：pulse = K * |offset|（偏离越多转越久）
+static const int TURN_PULSE_MIN    = 25 * 1000;  // 最小脉冲 25ms
+static const int TURN_PULSE_MAX    = 200 * 1000;  // 最大脉冲 200ms
 static const int GRAB_CONFIRM_THRESHOLD = 5;
-static const float GRAB_AREA_MAX = 0.50f;  // area 超过此值太近，先后退
+static const float GRAB_AREA_MAX = 0.65f;  // area 超过此值太近，先后退
 static const int BACKWARD_SPEED = 25;     // 后退速度
 static const int BACKWARD_PULSE_US = 200 * 1000; // 后退脉冲时间
-static const int GRAB_LEFT_TURN_SPEED = 10;       // 抓取前左转补偿速度（数值越小越慢）
+static const int GRAB_LEFT_TURN_SPEED = 25;       // 抓取前左转补偿速度（数值越小越慢）
 static const int GRAB_LEFT_TURN_US    = 150 * 1000; // 抓取前左转补偿时间
-static const int GRAB_LEFT_TURN_COUNT = 4;          // 左转补偿次数
+static const int GRAB_LEFT_TURN_COUNT = 2;          // 左转补偿次数
+static const int FWD_PULSE_US     = 150 * 1000; // 前进脉冲时间（每帧前进一段后停）
+static const int LOST_BALL_TOLERANCE = 2;       // 丢球容忍帧数，防止短暂丢失就切搜索
 
 struct RobotState {
     RobotStatus status;
     float area_ratio;
     int ball_cx;    // 球中心 x
     int grab_confirm_count;
+    int lost_ball_count;
 
-    RobotState() : status(STATUS_CHASE_TENNIS), area_ratio(0), ball_cx(0), grab_confirm_count(0) {}
+    RobotState() : status(STATUS_CHASE_TENNIS), area_ratio(0), ball_cx(0), grab_confirm_count(0), lost_ball_count(0) {}
 };
 
 
@@ -563,6 +566,7 @@ int main(int argc, char** argv) {
         long postprocess_time = (t2.tv_sec - t1.tv_sec) * 1000000 + (t2.tv_usec - t1.tv_usec);
         // ============ 状态机控制逻辑 ============
         if (det_num > 0) {
+            robot.lost_ball_count = 0;  // 检测到球，重置丢球计数
             // 选择最大的球（最近的）
             int best_idx = 0;
             for (int i = 1; i < det_num; i++) {
@@ -586,8 +590,8 @@ int main(int argc, char** argv) {
             int offset = ball_cx - center;
             bool centered = abs(offset) <= CENTER_MARGIN;
 
-            // 动态脉冲时间：area 越大脉冲越长，避免远距离转过头
-            int pulse_us = std::max(TURN_PULSE_MIN, std::min(TURN_PULSE_MAX, (int)(K_TURN_PULSE * area_ratio * 1000)));
+            // 脉冲时间与偏离中心幅度成正比：偏离少微调，偏离多大转
+            int pulse_us = std::max(TURN_PULSE_MIN, std::min(TURN_PULSE_MAX, (int)(K_TURN_PULSE * abs(offset))));
 
             if (area_ratio >= GRAB_AREA && centered) {
                 // 球足够近且居中 → 确认计数
@@ -655,24 +659,27 @@ int main(int argc, char** argv) {
                 robot.status = STATUS_CHASE_TENNIS;
 
                 if (!centered) {
-                    // 球偏左或偏右 → 持续差速转向，每帧更新目标，不停止
+                    // 原地转向
                     if (offset < 0) {
-                        // LOGI("[MOTOR] TURN LEFT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         MOTOR_DRIVE(-TURN_SPEED, TURN_SPEED);
                     } else {
-                        // LOGI("[MOTOR] TURN RIGHT (cx=%d offset=%d pulse=%dms)", ball_cx, offset, pulse_us / 1000);
                         MOTOR_DRIVE(TURN_SPEED, -TURN_SPEED);
                     }
                     usleep(pulse_us);
                     MOTOR_STANDBY();
                 } else {
-                    // 球居中 → 比例前进，越近越慢
-                    //float ratio = area_ratio / GRAB_AREA;
-                    //int fwd_speed = CHASE_SPEED - (int)((CHASE_SPEED - 5) * ratio);
-                    //if (fwd_speed < 5) fwd_speed = 5;
-                    //if (fwd_speed > CHASE_SPEED) fwd_speed = CHASE_SPEED;
-                    //MOTOR_FORWARD(fwd_speed);
-					MOTOR_FORWARD(CHASE_SPEED);
+                    // 球居中 → 比例前进
+                    float ratio = area_ratio / GRAB_AREA;
+                    int fwd_speed = CHASE_SPEED - (int)((CHASE_SPEED - 25) * ratio);
+                    if (fwd_speed < 25) fwd_speed = 25;
+                    if (fwd_speed > CHASE_SPEED) fwd_speed = CHASE_SPEED;
+                    MOTOR_FORWARD(fwd_speed);
+                    if (fwd_speed > 26) {
+                        // 高速时脉冲式防止冲过
+                        usleep(FWD_PULSE_US);
+                        MOTOR_STANDBY();
+                    }
+                    // 低速时持续前进，保证靠近球时不卡住
                 }
             }
 
@@ -704,11 +711,17 @@ int main(int argc, char** argv) {
 #endif
 
         } else {
-            LOGI("[DETECT] No ball detected, searching...");
-            g_total_detected += 0;  // no detection this frame
-            robot.grab_confirm_count = 0;
-            robot.status = STATUS_CHASE_TENNIS;
-            MOTOR_DRIVE(IDLE_SPEED, -IDLE_SPEED);  // 没看到球就连续右转搜索
+            robot.lost_ball_count++;
+            if (robot.lost_ball_count >= LOST_BALL_TOLERANCE) {
+                LOGI("[DETECT] No ball detected (%d frames), searching...", robot.lost_ball_count);
+                robot.grab_confirm_count = 0;
+                robot.status = STATUS_CHASE_TENNIS;
+                MOTOR_DRIVE(IDLE_SPEED, -IDLE_SPEED);  // 连续丢多帧才右转搜索
+            } else {
+                LOGI("[DETECT] Ball lost for %d frame(s), holding...", robot.lost_ball_count);
+                // 短暂丢球时保持静止，等下一帧确认
+                MOTOR_STANDBY();
+            }
         }
 
 #if ENABLE_SAVE_IMAGE
